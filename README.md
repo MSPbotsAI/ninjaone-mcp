@@ -55,6 +55,7 @@ Every request to `/mcp` must include the following HTTP headers:
 | `X-Ninja-Client-Id` | string | 必填 | 无 | 无(自由文本) | NinjaOne 一个 "API Services" 类型 OAuth2 App 的 Client ID(在 NinjaOne 后台 Administration → Apps → API 创建),本服务用它换取短期 bearer token,从不落盘存储。 | `X-Ninja-Client-Id: <client_id>` |
 | `X-Ninja-Client-Secret` | string | 必填 | 无 | 无(自由文本) | 同一个 OAuth2 App 的 Client Secret。 | `X-Ninja-Client-Secret: <client_secret>` |
 | `X-Ninja-Region` | string | 可选 | `us` | `us`, `eu`, `oc`, `ca`, `us2`, `fed` | NinjaOne 部署区域,决定实际请求的 base URL。 | `X-Ninja-Region: eu` |
+| `X-Ninja-Scopes` | string | 可选 | `monitoring management` | `monitoring`, `management`, `control`(空格或逗号分隔,可组合) | 要向 NinjaOne OAuth2 App 申请的 scope。**必须与该 App 实际被授予的 scope 完全匹配或是其子集**——多要一个没被授予的 scope,整个换 token 请求会被 NinjaOne 拒绝(400 `invalid_scope`),不会自动降级。本服务这 23 个工具都只需要 `monitoring`/`management`,不涉及 `control`(远程会话类),所以默认值不包含它;如果你的 App 只被授予了其中一个,必须显式传这个 header 精确指定。 | `X-Ninja-Scopes: monitoring` |
 
 Missing either required header returns `401 Unauthorized`.
 
@@ -75,7 +76,7 @@ POST http://localhost:8080/mcp
 
 Connect your MCP client with:
 - Transport: `http` (Streamable HTTP)
-- Headers: `X-Ninja-Client-Id`, `X-Ninja-Client-Secret` (both required), `X-Ninja-Region` (optional)
+- Headers: `X-Ninja-Client-Id`, `X-Ninja-Client-Secret` (both required), `X-Ninja-Region`, `X-Ninja-Scopes` (both optional)
 
 ## Tool List
 
@@ -154,4 +155,5 @@ Running a script on a device:
 - **`ninjaone_get_tickets` filters client-side**: NinjaOne's board-run endpoint's request schema defines `filters`/`searchCriteria` params, but the community wyre-technology project reports these 400 in practice — this tool always requests an unfiltered page and filters `status`/`organization_id`/`device_id` client-side instead.
 - **No single-ticket-get or standalone add-comment endpoint**: NinjaOne's ticketing API doesn't expose a `GET /ticketing/ticket/{id}` — to look up one ticket, page through `ninjaone_get_tickets` on its board. Adding a comment isn't a separate endpoint either — it's folded into `ninjaone_update_ticket`'s `comment`/`comment_public` params, alongside a `PUT` on the ticket itself.
 - **`ninjaone_get_devices`'s `df` filter can be silently dropped** by NinjaOne when scoping by organization (a known issue in the community project) — prefer `ninjaone_get_organization_devices` for an org-scoped device list.
-- Not yet tested against a live NinjaOne account with real credentials — verified so far: `tools/list` returns all 23 tools with clean schemas, `pytest` (15 tests) passes, and a live call with a dummy client_id/secret reached NinjaOne's real production `/oauth/token` endpoint and got back a real, well-formed rejection (`Client app not exist`) rather than a malformed-request error — confirming the base URL, token endpoint, and request format are correct.
+- **Fixed**: an earlier version of this server always requested `monitoring management control` regardless of what the caller's OAuth2 App was actually granted, which 400s (`Invalid scope control for client`) for any App without `control` — nearly all of them, since none of these 23 tools need it. The default is now `monitoring management` (matching the community SDK's own default), and `X-Ninja-Scopes` lets a caller narrow further or add `control` if a future tool needs it.
+- Verified against a live NinjaOne account: `tools/list` returns all 23 tools with clean schemas, `pytest` (24 tests) passes, and a real `ninjaone_get_organizations` call with real credentials (no `X-Ninja-Scopes` header, exercising the default) returned real organization data.

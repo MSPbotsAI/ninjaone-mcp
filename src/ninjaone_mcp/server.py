@@ -13,10 +13,11 @@ from .config import Settings, region_base_url
 # Per-request credential isolation via contextvars.
 # GatewayTokenMiddleware sets this before the MCP handler runs.
 # Python asyncio copies context per task, so concurrent SSE connections are isolated.
-# Value is (client_id, client_secret, region). Nothing here is ever cached
-# outside the request's own contextvar frame — see api_client.py's docstring
-# on why the derived OAuth2 token isn't cached across requests either.
-_gateway_creds_var: contextvars.ContextVar[tuple[str, str, str] | None] = contextvars.ContextVar(
+# Value is (client_id, client_secret, region, scopes). Nothing here is ever
+# cached outside the request's own contextvar frame — see api_client.py's
+# docstring on why the derived OAuth2 token isn't cached across requests
+# either.
+_gateway_creds_var: contextvars.ContextVar[tuple[str, str, str, str] | None] = contextvars.ContextVar(
     "ninjaone_gateway_creds", default=None
 )
 
@@ -26,17 +27,23 @@ def get_client_from_context(settings: Settings) -> NinjaOneClient | None:
     creds = _gateway_creds_var.get()
     if not creds:
         return None
-    client_id, client_secret, region = creds
-    return NinjaOneClient(client_id, client_secret, region_base_url(region))
+    client_id, client_secret, region, scopes = creds
+    return NinjaOneClient(client_id, client_secret, region_base_url(region), scopes or None)
 
 
 class GatewayTokenMiddleware:
     """ASGI middleware.
 
-    Reads X-Ninja-Client-Id and X-Ninja-Client-Secret (both required) and
-    X-Ninja-Region (optional, defaults to "us") from request headers and
-    stores them in the contextvar. Returns 401 if a required header is
-    missing on /mcp requests.
+    Reads X-Ninja-Client-Id and X-Ninja-Client-Secret (both required),
+    X-Ninja-Region (optional, defaults to "us"), and X-Ninja-Scopes
+    (optional, space/comma-separated subset of monitoring/management/
+    control — defaults to "monitoring management" if omitted) from
+    request headers and stores them in the contextvar. NinjaOne rejects a
+    client_credentials request asking for a scope the app was never
+    granted (400 invalid_scope) rather than narrowing it, so a caller whose
+    app lacks e.g. `control` MUST send X-Ninja-Scopes naming only what it
+    actually has. Returns 401 if a required header is missing on /mcp
+    requests.
     """
 
     def __init__(self, app: ASGIApp, settings: Settings):
@@ -57,6 +64,7 @@ class GatewayTokenMiddleware:
         client_id = request.headers.get("x-ninja-client-id")
         client_secret = request.headers.get("x-ninja-client-secret")
         region = request.headers.get("x-ninja-region")
+        scopes = request.headers.get("x-ninja-scopes")
         if not client_id or not client_secret:
             response = JSONResponse(
                 {
@@ -67,14 +75,14 @@ class GatewayTokenMiddleware:
                         "Services OAuth2 app's client credentials)"
                     ),
                     "required_headers": ["X-Ninja-Client-Id", "X-Ninja-Client-Secret"],
-                    "optional_headers": ["X-Ninja-Region"],
+                    "optional_headers": ["X-Ninja-Region", "X-Ninja-Scopes"],
                 },
                 status_code=401,
             )
             await response(scope, receive, send)
             return
 
-        ctx_token = _gateway_creds_var.set((client_id, client_secret, region or ""))
+        ctx_token = _gateway_creds_var.set((client_id, client_secret, region or "", scopes or ""))
         try:
             await self.app(scope, receive, send)
         finally:

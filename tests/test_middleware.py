@@ -36,6 +36,7 @@ def test_missing_header_returns_401_with_required_headers_listed():
         body = resp.json()
         assert "X-Ninja-Client-Id" in body["required_headers"]
         assert "X-Ninja-Client-Secret" in body["required_headers"]
+        assert "X-Ninja-Scopes" in body["optional_headers"]
 
 
 def test_header_present_reaches_request_context(monkeypatch):
@@ -65,6 +66,7 @@ def test_header_present_reaches_request_context(monkeypatch):
                 (b"x-ninja-client-id", b"test-id"),
                 (b"x-ninja-client-secret", b"test-secret"),
                 (b"x-ninja-region", b"eu"),
+                (b"x-ninja-scopes", b"monitoring"),
             ],
         }
 
@@ -79,7 +81,7 @@ def test_header_present_reaches_request_context(monkeypatch):
         await middleware(scope, receive, send)
 
     asyncio.run(run())
-    assert seen["creds"] == ("test-id", "test-secret", "eu")
+    assert seen["creds"] == ("test-id", "test-secret", "eu", "monitoring")
     # After the request completes, the contextvar must be reset — a fresh
     # get() outside any request context sees no leftover credential.
     assert _gateway_creds_var.get() is None

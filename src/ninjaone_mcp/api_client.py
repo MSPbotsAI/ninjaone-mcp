@@ -9,7 +9,29 @@ _TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _MAX_RETRIES = 3
 _MAX_BACKOFF_SECONDS = 20.0
-_DEFAULT_SCOPES = "monitoring management control"
+_VALID_SCOPES = {"monitoring", "management", "control"}
+# Matches the community wyre-technology/ninjaone-mcp SDK's own default grant
+# request — NOT "control", which many API Services apps are never granted
+# (it's remote-access). Asking for a scope the app lacks 400s at the token
+# endpoint rather than narrowing the grant, so defaulting to the two nearly
+# every app has is safer than asking for everything and letting most callers
+# fail. A caller whose app also has `control` (or only has one of the two)
+# must say so explicitly via X-Ninja-Scopes.
+_DEFAULT_SCOPES = "monitoring management"
+
+
+def normalize_scopes(raw: str | None) -> str | None:
+    """Parse a space/comma-separated scope string, dropping anything not in
+    monitoring/management/control. Returns None for "not specified" (blank,
+    or nothing recognized) so the caller falls back to _DEFAULT_SCOPES,
+    rather than ever sending an empty `scope=` to NinjaOne.
+    """
+    if not raw or not raw.strip():
+        return None
+    tokens = [t.lower() for t in raw.replace(",", " ").split() if t]
+    valid = [t for t in tokens if t in _VALID_SCOPES]
+    return " ".join(valid) or None
+
 
 # One shared connection pool for the process lifetime. No credentials are
 # ever stored on it — client_id/client_secret are passed per-request (see
@@ -75,7 +97,7 @@ class NinjaOneClient:
         self._client_id = client_id
         self._client_secret = client_secret
         self._base_url = base_url.rstrip("/")
-        self._scopes = scopes or _DEFAULT_SCOPES
+        self._scopes = normalize_scopes(scopes) or _DEFAULT_SCOPES
 
     async def _get_access_token(self) -> str:
         client = _get_http_client()
