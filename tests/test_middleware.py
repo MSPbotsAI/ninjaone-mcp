@@ -7,7 +7,7 @@ from starlette.testclient import TestClient
 
 from ninjaone_mcp.__main__ import _build_http_app
 from ninjaone_mcp.config import Settings
-from ninjaone_mcp.server import create_mcp_server, get_client_from_context
+from ninjaone_mcp.server import create_mcp_server, get_client_from_context, get_user_client_from_context
 
 
 def _make_app():
@@ -37,6 +37,9 @@ def test_missing_header_returns_401_with_required_headers_listed():
         assert "X-Ninja-Client-Id" in body["required_headers"]
         assert "X-Ninja-Client-Secret" in body["required_headers"]
         assert "X-Ninja-Scopes" in body["optional_headers"]
+        assert "X-Ninja-User-Client-Id" in body["optional_headers"]
+        assert "X-Ninja-User-Client-Secret" in body["optional_headers"]
+        assert "X-Ninja-Refresh-Token" in body["optional_headers"]
 
 
 def test_header_present_reaches_request_context(monkeypatch):
@@ -81,12 +84,60 @@ def test_header_present_reaches_request_context(monkeypatch):
         await middleware(scope, receive, send)
 
     asyncio.run(run())
-    assert seen["creds"] == ("test-id", "test-secret", "eu", "monitoring")
+    assert seen["creds"] == ("test-id", "test-secret", "eu", "monitoring", "", "", "")
     # After the request completes, the contextvar must be reset — a fresh
     # get() outside any request context sees no leftover credential.
     assert _gateway_creds_var.get() is None
 
 
+def test_user_headers_reach_request_context():
+    # The three optional X-Ninja-User-*/X-Ninja-Refresh-Token headers are
+    # independent of the required machine credentials — confirms they land
+    # in the same contextvar frame alongside them.
+    import asyncio
+
+    from ninjaone_mcp.server import GatewayTokenMiddleware, _gateway_creds_var
+
+    settings = Settings()
+    seen = {}
+
+    async def fake_app(scope, receive, send):
+        seen["creds"] = _gateway_creds_var.get()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    middleware = GatewayTokenMiddleware(fake_app, settings)
+
+    async def run():
+        scope = {
+            "type": "http",
+            "path": "/mcp",
+            "headers": [
+                (b"x-ninja-client-id", b"test-id"),
+                (b"x-ninja-client-secret", b"test-secret"),
+                (b"x-ninja-user-client-id", b"user-id"),
+                (b"x-ninja-user-client-secret", b"user-secret"),
+                (b"x-ninja-refresh-token", b"rt-123"),
+            ],
+        }
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            pass
+
+        await middleware(scope, receive, send)
+
+    asyncio.run(run())
+    assert seen["creds"] == ("test-id", "test-secret", "", "", "user-id", "user-secret", "rt-123")
+
+
 def test_client_factory_returns_none_without_context():
     settings = Settings()
     assert get_client_from_context(settings) is None
+
+
+def test_user_client_factory_returns_none_without_context():
+    settings = Settings()
+    assert get_user_client_from_context(settings) is None

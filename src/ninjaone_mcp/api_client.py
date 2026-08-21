@@ -91,25 +91,53 @@ class NinjaOneClient:
     tool calls — the client_id/client_secret arrive per-request from the
     gateway header (see server.py) and are never persisted, so there is no
     module-level place a token could leak between tenants either.
+
+    Some actions (confirmed: running a script on a device) are rejected
+    for a machine (API Services app) identity regardless of scope, because
+    NinjaOne ties that action to a real user for its audit trail — those
+    need a *user*-context token instead. Passing `refresh_token` switches
+    this client from the client_credentials grant to the refresh_token
+    grant: client_id/client_secret here are then a Web Application app's
+    (not an API Services app's), and the token represents whatever human
+    user did the one-time browser authorization that produced this
+    refresh_token — subject to that user's own NinjaOne role/permissions,
+    not this app's scope grant.
     """
 
-    def __init__(self, client_id: str, client_secret: str, base_url: str, scopes: str | None = None):
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        base_url: str,
+        scopes: str | None = None,
+        refresh_token: str | None = None,
+    ):
         self._client_id = client_id
         self._client_secret = client_secret
         self._base_url = base_url.rstrip("/")
         self._scopes = normalize_scopes(scopes) or _DEFAULT_SCOPES
+        self._refresh_token = refresh_token or None
 
     async def _get_access_token(self) -> str:
         client = _get_http_client()
+        if self._refresh_token:
+            data = {
+                "grant_type": "refresh_token",
+                "refresh_token": self._refresh_token,
+                "client_id": self._client_id,
+                "client_secret": self._client_secret,
+            }
+        else:
+            data = {
+                "grant_type": "client_credentials",
+                "client_id": self._client_id,
+                "client_secret": self._client_secret,
+                "scope": self._scopes,
+            }
         try:
             resp = await client.post(
                 f"{self._base_url}/oauth/token",
-                data={
-                    "grant_type": "client_credentials",
-                    "client_id": self._client_id,
-                    "client_secret": self._client_secret,
-                    "scope": self._scopes,
-                },
+                data=data,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
         except httpx.RequestError as e:

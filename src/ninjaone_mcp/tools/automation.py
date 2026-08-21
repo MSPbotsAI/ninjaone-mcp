@@ -7,7 +7,7 @@ from pydantic import Field
 
 from .._json import dump_json_capped
 from ..api_client import NinjaOneClient, NinjaOneError
-from ._common import NO_TOKEN
+from ._common import NO_TOKEN, NO_USER_TOKEN
 
 # These 5 endpoints were pulled from NinjaOne's official OpenAPI 3.0.1 spec
 # (per the request that specified this module): GET /v2/automation/scripts
@@ -25,7 +25,11 @@ from ._common import NO_TOKEN
 # certain.
 
 
-def register(mcp: FastMCP, client_factory: Callable[[], NinjaOneClient | None]) -> None:
+def register(
+    mcp: FastMCP,
+    client_factory: Callable[[], NinjaOneClient | None],
+    user_client_factory: Callable[[], NinjaOneClient | None],
+) -> None:
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def ninjaone_get_automation_scripts() -> str:
@@ -75,12 +79,14 @@ def register(mcp: FastMCP, client_factory: Callable[[], NinjaOneClient | None]) 
     ) -> str:
         """Run a script or built-in action on a device. Destructive: executes real code on the device.
 
-        Queues a job rather than running synchronously — use ninjaone_get_device_active_jobs
-        or ninjaone_get_active_jobs afterward to check progress/completion.
+        Needs the X-Ninja-User-Client-Id/-Secret/X-Ninja-Refresh-Token
+        headers — NinjaOne rejects script execution from a machine identity
+        regardless of scope, since it ties the action to a real user.
+        Queues a job — check ninjaone_get_device_active_jobs afterward.
         """
-        client = client_factory()
+        client = user_client_factory()
         if client is None:
-            return NO_TOKEN
+            return NO_USER_TOKEN
         body: dict = {"type": type}
         if script_id is not None:
             body["id"] = script_id

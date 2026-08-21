@@ -20,6 +20,8 @@ This was built starting from the community [wyre-technology/ninjaone-mcp](https:
 
 NinjaOne authenticates via **OAuth2 client_credentials**: a NinjaOne "API Services" OAuth2 app's client ID + secret are exchanged for a short-lived bearer token at `POST {base_url}/oauth/token`. This server does that exchange itself, fresh on every tool call — it never stores or caches a token (or the client_id/secret) across calls.
 
+**One tool needs a second identity.** `ninjaone_run_script_on_device` is believed to be rejected by NinjaOne when called with a machine (API Services app) token regardless of scope, because NinjaOne ties script execution to a real user for its audit trail — this is the working hypothesis behind the design below, not yet independently confirmed against a real device/script by this repo. That tool alone uses a *second*, optional credential set — a NinjaOne "Web Application" OAuth2 app's client ID + secret, plus a refresh token obtained once via that app's browser authorization (`grant_type=authorization_code`) — exchanged via `grant_type=refresh_token` on every call, the same "never cache" pattern as the machine credential. The other 22 tools are unaffected either way.
+
 ## Quick Start
 
 ### Docker (recommended)
@@ -56,8 +58,11 @@ Every request to `/mcp` must include the following HTTP headers:
 | `X-Ninja-Client-Secret` | string | 必填 | 无 | 无(自由文本) | 同一个 OAuth2 App 的 Client Secret。 | `X-Ninja-Client-Secret: <client_secret>` |
 | `X-Ninja-Region` | string | 可选 | `us` | `us`, `eu`, `oc`, `ca`, `us2`, `fed` | NinjaOne 部署区域,决定实际请求的 base URL。 | `X-Ninja-Region: eu` |
 | `X-Ninja-Scopes` | string | 可选 | `monitoring management` | `monitoring`, `management`, `control`(空格或逗号分隔,可组合) | 要向 NinjaOne OAuth2 App 申请的 scope。**必须与该 App 实际被授予的 scope 完全匹配或是其子集**——多要一个没被授予的 scope,整个换 token 请求会被 NinjaOne 拒绝(400 `invalid_scope`),不会自动降级。本服务这 23 个工具都只需要 `monitoring`/`management`,不涉及 `control`(远程会话类),所以默认值不包含它;如果你的 App 只被授予了其中一个,必须显式传这个 header 精确指定。 | `X-Ninja-Scopes: monitoring` |
+| `X-Ninja-User-Client-Id` | string | 可选(仅 `ninjaone_run_script_on_device` 需要) | 无 | 无(自由文本) | NinjaOne 一个 **"Web Application"** 类型 OAuth2 App 的 Client ID(不是 API Services App)。 | `X-Ninja-User-Client-Id: <client_id>` |
+| `X-Ninja-User-Client-Secret` | string | 可选(同上) | 无 | 无(自由文本) | 同一个 Web Application App 的 Client Secret。 | `X-Ninja-User-Client-Secret: <client_secret>` |
+| `X-Ninja-Refresh-Token` | string | 可选(同上) | 无 | 无(自由文本) | 该 Web Application App 一次性浏览器授权(`grant_type=authorization_code`,建议勾 `offline_access` scope)拿到的 refresh token。本服务用它换取代表那个登录用户的短期 bearer token(`grant_type=refresh_token`),权限跟随该用户在 NinjaOne 里的角色,与 App 自身的 scope 无关。 | `X-Ninja-Refresh-Token: <refresh_token>` |
 
-Missing either required header returns `401 Unauthorized`.
+Missing either of the two required headers returns `401 Unauthorized`. Missing the three optional user-identity headers only affects `ninjaone_run_script_on_device` (returns a `not_configured` error) — every other tool works fine without them.
 
 ## Environment Variables
 
@@ -76,7 +81,7 @@ POST http://localhost:8080/mcp
 
 Connect your MCP client with:
 - Transport: `http` (Streamable HTTP)
-- Headers: `X-Ninja-Client-Id`, `X-Ninja-Client-Secret` (both required), `X-Ninja-Region`, `X-Ninja-Scopes` (both optional)
+- Headers: `X-Ninja-Client-Id`, `X-Ninja-Client-Secret` (both required), `X-Ninja-Region`, `X-Ninja-Scopes` (optional), `X-Ninja-User-Client-Id`, `X-Ninja-User-Client-Secret`, `X-Ninja-Refresh-Token` (optional, only for `ninjaone_run_script_on_device`)
 
 ## Tool List
 
@@ -102,7 +107,7 @@ Connect your MCP client with:
 | `ninjaone_get_ticket_log_entries` | 查工单日志(描述/评论/变更历史) | `ticket_id`(必填), `entry_type?` |
 | `ninjaone_get_automation_scripts` | 列出可用的自动化脚本 | 无 |
 | `ninjaone_get_device_scripting_options` | 查设备上可运行的脚本/内置动作/凭据选项 | `device_id`(必填) |
-| `ninjaone_run_script_on_device` | 在设备上运行脚本或内置动作(破坏性操作) | `device_id`(必填), `type`(必填,"SCRIPT"/"ACTION"), `script_id?`, `action_uid?`, `parameters?`, `run_as?` |
+| `ninjaone_run_script_on_device` | 在设备上运行脚本或内置动作(破坏性操作,需要 `X-Ninja-User-*`/`X-Ninja-Refresh-Token`) | `device_id`(必填), `type`(必填,"SCRIPT"/"ACTION"), `script_id?`, `action_uid?`, `parameters?`, `run_as?` |
 | `ninjaone_get_active_jobs` | 全局列出正在运行/排队的任务 | `job_type?`, `df?` |
 | `ninjaone_get_device_active_jobs` | 查单个设备正在运行/排队的任务 | `device_id`(必填) |
 
@@ -156,4 +161,5 @@ Running a script on a device:
 - **No single-ticket-get or standalone add-comment endpoint**: NinjaOne's ticketing API doesn't expose a `GET /ticketing/ticket/{id}` — to look up one ticket, page through `ninjaone_get_tickets` on its board. Adding a comment isn't a separate endpoint either — it's folded into `ninjaone_update_ticket`'s `comment`/`comment_public` params, alongside a `PUT` on the ticket itself.
 - **`ninjaone_get_devices`'s `df` filter can be silently dropped** by NinjaOne when scoping by organization (a known issue in the community project) — prefer `ninjaone_get_organization_devices` for an org-scoped device list.
 - **Fixed**: an earlier version of this server always requested `monitoring management control` regardless of what the caller's OAuth2 App was actually granted, which 400s (`Invalid scope control for client`) for any App without `control` — nearly all of them, since none of these 23 tools need it. The default is now `monitoring management` (matching the community SDK's own default), and `X-Ninja-Scopes` lets a caller narrow further or add `control` if a future tool needs it.
-- Verified against a live NinjaOne account: `tools/list` returns all 23 tools with clean schemas, `pytest` (24 tests) passes, and a real `ninjaone_get_organizations` call with real credentials (no `X-Ninja-Scopes` header, exercising the default) returned real organization data.
+- **`ninjaone_run_script_on_device` uses a second, user-context credential** (`X-Ninja-User-Client-Id`/`-Secret`/`X-Ninja-Refresh-Token`, a Web Application app + refresh_token grant) instead of the machine credential every other tool uses — see the Overview section above for why. This is unverified against a real device/script so far; only the plumbing (missing-creds error path, and a live token exchange attempt with dummy user credentials reaching NinjaOne's real `/oauth/token` and getting a genuine rejection rather than a malformed-request error) has been checked.
+- Verified against a live NinjaOne account: `tools/list` returns all 23 tools with clean schemas, `pytest` (26 tests) passes, and a real `ninjaone_get_organizations` call with real credentials (no `X-Ninja-Scopes` header, exercising the default) returned real organization data.

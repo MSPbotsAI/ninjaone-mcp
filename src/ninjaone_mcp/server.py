@@ -1,5 +1,6 @@
 import contextvars
 from collections.abc import Callable
+from typing import NamedTuple
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -10,25 +11,58 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .api_client import NinjaOneClient
 from .config import Settings, region_base_url
 
+
+class _GatewayCreds(NamedTuple):
+    client_id: str
+    client_secret: str
+    region: str
+    scopes: str
+    # Optional second identity for actions that need a real user's own
+    # NinjaOne permissions rather than this app's scope grant (confirmed:
+    # running a script) — see api_client.py's NinjaOneClient docstring.
+    # Empty string means "not configured", same convention as region/scopes
+    # above.
+    user_client_id: str
+    user_client_secret: str
+    refresh_token: str
+
+
 # Per-request credential isolation via contextvars.
 # GatewayTokenMiddleware sets this before the MCP handler runs.
 # Python asyncio copies context per task, so concurrent SSE connections are isolated.
-# Value is (client_id, client_secret, region, scopes). Nothing here is ever
-# cached outside the request's own contextvar frame — see api_client.py's
-# docstring on why the derived OAuth2 token isn't cached across requests
-# either.
-_gateway_creds_var: contextvars.ContextVar[tuple[str, str, str, str] | None] = contextvars.ContextVar(
+# Nothing here is ever cached outside the request's own contextvar frame —
+# see api_client.py's docstring on why the derived OAuth2 token isn't
+# cached across requests either.
+_gateway_creds_var: contextvars.ContextVar[_GatewayCreds | None] = contextvars.ContextVar(
     "ninjaone_gateway_creds", default=None
 )
 
 
 def get_client_from_context(settings: Settings) -> NinjaOneClient | None:
-    """Resolve the active NinjaOneClient for the current request context."""
+    """Resolve the active machine-identity NinjaOneClient (client_credentials)."""
     creds = _gateway_creds_var.get()
     if not creds:
         return None
-    client_id, client_secret, region, scopes = creds
-    return NinjaOneClient(client_id, client_secret, region_base_url(region), scopes or None)
+    return NinjaOneClient(
+        creds.client_id, creds.client_secret, region_base_url(creds.region), creds.scopes or None
+    )
+
+
+def get_user_client_from_context(settings: Settings) -> NinjaOneClient | None:
+    """Resolve the active user-identity NinjaOneClient (refresh_token), or
+    None if the caller didn't send the three X-Ninja-User-*/X-Ninja-Refresh-
+    Token headers — that's a normal, expected state for any tenant that
+    hasn't set up a Web Application app, not an error by itself.
+    """
+    creds = _gateway_creds_var.get()
+    if not creds or not (creds.user_client_id and creds.user_client_secret and creds.refresh_token):
+        return None
+    return NinjaOneClient(
+        creds.user_client_id,
+        creds.user_client_secret,
+        region_base_url(creds.region),
+        refresh_token=creds.refresh_token,
+    )
 
 
 class GatewayTokenMiddleware:
@@ -44,6 +78,14 @@ class GatewayTokenMiddleware:
     app lacks e.g. `control` MUST send X-Ninja-Scopes naming only what it
     actually has. Returns 401 if a required header is missing on /mcp
     requests.
+
+    Also reads three independent, optional headers for a second, *user*-
+    context identity: X-Ninja-User-Client-Id, X-Ninja-User-Client-Secret,
+    X-Ninja-Refresh-Token (a Web Application app's credentials plus a
+    refresh token from that app's one-time browser authorization). These
+    are not required — most tools never use them — but ninjaone_run_script_
+    on_device needs them because NinjaOne rejects script execution from a
+    machine identity regardless of scope.
     """
 
     def __init__(self, app: ASGIApp, settings: Settings):
@@ -65,6 +107,9 @@ class GatewayTokenMiddleware:
         client_secret = request.headers.get("x-ninja-client-secret")
         region = request.headers.get("x-ninja-region")
         scopes = request.headers.get("x-ninja-scopes")
+        user_client_id = request.headers.get("x-ninja-user-client-id")
+        user_client_secret = request.headers.get("x-ninja-user-client-secret")
+        refresh_token = request.headers.get("x-ninja-refresh-token")
         if not client_id or not client_secret:
             response = JSONResponse(
                 {
@@ -75,14 +120,30 @@ class GatewayTokenMiddleware:
                         "Services OAuth2 app's client credentials)"
                     ),
                     "required_headers": ["X-Ninja-Client-Id", "X-Ninja-Client-Secret"],
-                    "optional_headers": ["X-Ninja-Region", "X-Ninja-Scopes"],
+                    "optional_headers": [
+                        "X-Ninja-Region",
+                        "X-Ninja-Scopes",
+                        "X-Ninja-User-Client-Id",
+                        "X-Ninja-User-Client-Secret",
+                        "X-Ninja-Refresh-Token",
+                    ],
                 },
                 status_code=401,
             )
             await response(scope, receive, send)
             return
 
-        ctx_token = _gateway_creds_var.set((client_id, client_secret, region or "", scopes or ""))
+        ctx_token = _gateway_creds_var.set(
+            _GatewayCreds(
+                client_id,
+                client_secret,
+                region or "",
+                scopes or "",
+                user_client_id or "",
+                user_client_secret or "",
+                refresh_token or "",
+            )
+        )
         try:
             await self.app(scope, receive, send)
         finally:
@@ -117,12 +178,17 @@ def create_mcp_server(settings: Settings) -> FastMCP:
             "ninjaone_get_organizations or ninjaone_get_devices to find an id, then "
             "a device/org-scoped tool; for scripting, ninjaone_get_device_scripting_"
             "options to see what's runnable on a device before ninjaone_run_script_"
-            "on_device, then ninjaone_get_device_active_jobs to watch it run."
+            "on_device, then ninjaone_get_device_active_jobs to watch it run. "
+            "ninjaone_run_script_on_device alone needs a second, user-context "
+            "credential — see its own description."
         ),
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
 
     client_factory: Callable[[], NinjaOneClient | None] = lambda: get_client_from_context(settings)
+    user_client_factory: Callable[[], NinjaOneClient | None] = lambda: get_user_client_from_context(
+        settings
+    )
 
     from .tools import alerts, automation, devices, organizations, tickets
 
@@ -130,6 +196,6 @@ def create_mcp_server(settings: Settings) -> FastMCP:
     devices.register(mcp, client_factory)
     alerts.register(mcp, client_factory)
     tickets.register(mcp, client_factory)
-    automation.register(mcp, client_factory)
+    automation.register(mcp, client_factory, user_client_factory)
 
     return mcp
