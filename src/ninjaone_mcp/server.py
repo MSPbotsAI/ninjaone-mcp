@@ -13,79 +13,62 @@ from .config import Settings, region_base_url
 
 
 class _GatewayCreds(NamedTuple):
-    client_id: str
-    client_secret: str
+    token: str
     region: str
-    scopes: str
     # Optional second identity for actions that need a real user's own
-    # NinjaOne permissions rather than this app's scope grant (confirmed:
+    # NinjaOne permissions rather than this token's grant (confirmed:
     # running a script) — see api_client.py's NinjaOneClient docstring.
-    # Empty string means "not configured", same convention as region/scopes
-    # above.
-    user_client_id: str
-    user_client_secret: str
-    refresh_token: str
+    # Empty string means "not configured".
+    user_token: str
 
 
 # Per-request credential isolation via contextvars.
 # GatewayTokenMiddleware sets this before the MCP handler runs.
 # Python asyncio copies context per task, so concurrent SSE connections are isolated.
 # Nothing here is ever cached outside the request's own contextvar frame —
-# see api_client.py's docstring on why the derived OAuth2 token isn't
-# cached across requests either.
+# the gateway is responsible for exchanging/refreshing these tokens; this
+# server only ever holds one for the lifetime of one request.
 _gateway_creds_var: contextvars.ContextVar[_GatewayCreds | None] = contextvars.ContextVar(
     "ninjaone_gateway_creds", default=None
 )
 
 
 def get_client_from_context(settings: Settings) -> NinjaOneClient | None:
-    """Resolve the active machine-identity NinjaOneClient (client_credentials)."""
+    """Resolve the active machine-identity NinjaOneClient."""
     creds = _gateway_creds_var.get()
     if not creds:
         return None
-    return NinjaOneClient(
-        creds.client_id, creds.client_secret, region_base_url(creds.region), creds.scopes or None
-    )
+    return NinjaOneClient(creds.token, region_base_url(creds.region))
 
 
 def get_user_client_from_context(settings: Settings) -> NinjaOneClient | None:
-    """Resolve the active user-identity NinjaOneClient (refresh_token), or
-    None if the caller didn't send the three X-Ninja-User-*/X-Ninja-Refresh-
-    Token headers — that's a normal, expected state for any tenant that
-    hasn't set up a Web Application app, not an error by itself.
+    """Resolve the active user-identity NinjaOneClient, or None if the
+    caller didn't send X-Ninja-User-Token — that's a normal, expected state
+    for any tenant that hasn't set up a Web Application app, not an error
+    by itself.
     """
     creds = _gateway_creds_var.get()
-    if not creds or not (creds.user_client_id and creds.user_client_secret and creds.refresh_token):
+    if not creds or not creds.user_token:
         return None
-    return NinjaOneClient(
-        creds.user_client_id,
-        creds.user_client_secret,
-        region_base_url(creds.region),
-        refresh_token=creds.refresh_token,
-    )
+    return NinjaOneClient(creds.user_token, region_base_url(creds.region))
 
 
 class GatewayTokenMiddleware:
     """ASGI middleware.
 
-    Reads X-Ninja-Client-Id and X-Ninja-Client-Secret (both required),
-    X-Ninja-Region (optional, defaults to "us"), and X-Ninja-Scopes
-    (optional, space/comma-separated subset of monitoring/management/
-    control — defaults to "monitoring management" if omitted) from
-    request headers and stores them in the contextvar. NinjaOne rejects a
-    client_credentials request asking for a scope the app was never
-    granted (400 invalid_scope) rather than narrowing it, so a caller whose
-    app lacks e.g. `control` MUST send X-Ninja-Scopes naming only what it
-    actually has. Returns 401 if a required header is missing on /mcp
-    requests.
+    Reads X-Ninja-Token (required) — an already-exchanged OAuth2 bearer
+    access token for a machine identity — and X-Ninja-Region (optional,
+    defaults to "us") from request headers and stores them in the
+    contextvar. The gateway is responsible for the OAuth2 exchange
+    (client_credentials) and for refreshing the token before it expires;
+    this server only ever uses whatever token it's handed, per request.
+    Returns 401 if X-Ninja-Token is missing on /mcp requests.
 
-    Also reads three independent, optional headers for a second, *user*-
-    context identity: X-Ninja-User-Client-Id, X-Ninja-User-Client-Secret,
-    X-Ninja-Refresh-Token (a Web Application app's credentials plus a
-    refresh token from that app's one-time browser authorization). These
-    are not required — most tools never use them — but ninjaone_run_script_
-    on_device needs them because NinjaOne rejects script execution from a
-    machine identity regardless of scope.
+    Also reads one independent, optional header for a second, *user*-
+    context identity: X-Ninja-User-Token (an already-exchanged refresh_
+    token-grant access token). Most tools never use it, but ninjaone_run_
+    script_on_device needs it because NinjaOne rejects script execution
+    from a machine identity regardless of scope.
     """
 
     def __init__(self, app: ASGIApp, settings: Settings):
@@ -103,47 +86,26 @@ class GatewayTokenMiddleware:
             return
 
         request = Request(scope)
-        client_id = request.headers.get("x-ninja-client-id")
-        client_secret = request.headers.get("x-ninja-client-secret")
+        token = request.headers.get("x-ninja-token")
         region = request.headers.get("x-ninja-region")
-        scopes = request.headers.get("x-ninja-scopes")
-        user_client_id = request.headers.get("x-ninja-user-client-id")
-        user_client_secret = request.headers.get("x-ninja-user-client-secret")
-        refresh_token = request.headers.get("x-ninja-refresh-token")
-        if not client_id or not client_secret:
+        user_token = request.headers.get("x-ninja-user-token")
+        if not token:
             response = JSONResponse(
                 {
                     "error": "Missing credentials",
                     "message": (
-                        "This server requires the X-Ninja-Client-Id and "
-                        "X-Ninja-Client-Secret headers (a NinjaOne API "
-                        "Services OAuth2 app's client credentials)"
+                        "This server requires the X-Ninja-Token header (an "
+                        "already-exchanged OAuth2 bearer access token)"
                     ),
-                    "required_headers": ["X-Ninja-Client-Id", "X-Ninja-Client-Secret"],
-                    "optional_headers": [
-                        "X-Ninja-Region",
-                        "X-Ninja-Scopes",
-                        "X-Ninja-User-Client-Id",
-                        "X-Ninja-User-Client-Secret",
-                        "X-Ninja-Refresh-Token",
-                    ],
+                    "required_headers": ["X-Ninja-Token"],
+                    "optional_headers": ["X-Ninja-Region", "X-Ninja-User-Token"],
                 },
                 status_code=401,
             )
             await response(scope, receive, send)
             return
 
-        ctx_token = _gateway_creds_var.set(
-            _GatewayCreds(
-                client_id,
-                client_secret,
-                region or "",
-                scopes or "",
-                user_client_id or "",
-                user_client_secret or "",
-                refresh_token or "",
-            )
-        )
+        ctx_token = _gateway_creds_var.set(_GatewayCreds(token, region or "", user_token or ""))
         try:
             await self.app(scope, receive, send)
         finally:

@@ -9,32 +9,9 @@ _TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _MAX_RETRIES = 3
 _MAX_BACKOFF_SECONDS = 20.0
-_VALID_SCOPES = {"monitoring", "management", "control"}
-# Matches the community wyre-technology/ninjaone-mcp SDK's own default grant
-# request — NOT "control", which many API Services apps are never granted
-# (it's remote-access). Asking for a scope the app lacks 400s at the token
-# endpoint rather than narrowing the grant, so defaulting to the two nearly
-# every app has is safer than asking for everything and letting most callers
-# fail. A caller whose app also has `control` (or only has one of the two)
-# must say so explicitly via X-Ninja-Scopes.
-_DEFAULT_SCOPES = "monitoring management"
-
-
-def normalize_scopes(raw: str | None) -> str | None:
-    """Parse a space/comma-separated scope string, dropping anything not in
-    monitoring/management/control. Returns None for "not specified" (blank,
-    or nothing recognized) so the caller falls back to _DEFAULT_SCOPES,
-    rather than ever sending an empty `scope=` to NinjaOne.
-    """
-    if not raw or not raw.strip():
-        return None
-    tokens = [t.lower() for t in raw.replace(",", " ").split() if t]
-    valid = [t for t in tokens if t in _VALID_SCOPES]
-    return " ".join(valid) or None
-
 
 # One shared connection pool for the process lifetime. No credentials are
-# ever stored on it — client_id/client_secret are passed per-request (see
+# ever stored on it — the bearer token is passed per-request (see
 # server.py's contextvar-based credential isolation), so sharing the pool
 # across tenants/requests is safe: it holds only TCP connections, never a
 # request's auth material.
@@ -83,75 +60,18 @@ class NinjaOneError(Exception):
 class NinjaOneClient:
     """Async httpx client wrapping the NinjaOne Public API v2.
 
-    NinjaOne authenticates via OAuth2 client_credentials (POST /oauth/token
-    with client_id/client_secret/scope, returning a short-lived bearer
-    token) rather than a single long-lived API key. This client exchanges
-    a fresh token once per logical request (reused only across that one
-    request's own retry attempts) and never caches a token across separate
-    tool calls — the client_id/client_secret arrive per-request from the
-    gateway header (see server.py) and are never persisted, so there is no
-    module-level place a token could leak between tenants either.
-
-    Some actions (confirmed: running a script on a device) are rejected
-    for a machine (API Services app) identity regardless of scope, because
-    NinjaOne ties that action to a real user for its audit trail — those
-    need a *user*-context token instead. Passing `refresh_token` switches
-    this client from the client_credentials grant to the refresh_token
-    grant: client_id/client_secret here are then a Web Application app's
-    (not an API Services app's), and the token represents whatever human
-    user did the one-time browser authorization that produced this
-    refresh_token — subject to that user's own NinjaOne role/permissions,
-    not this app's scope grant.
+    Takes an already-exchanged OAuth2 bearer access token, not a client_id/
+    client_secret — the gateway does the OAuth2 exchange (client_credentials
+    for the machine identity, refresh_token for the user identity used by
+    ninjaone_run_script_on_device) and hands this client only the resulting
+    token per request (see server.py). This client never sees, stores, or
+    caches any credential material; it only ever holds the token for the
+    lifetime of one request object.
     """
 
-    def __init__(
-        self,
-        client_id: str,
-        client_secret: str,
-        base_url: str,
-        scopes: str | None = None,
-        refresh_token: str | None = None,
-    ):
-        self._client_id = client_id
-        self._client_secret = client_secret
+    def __init__(self, token: str, base_url: str):
+        self._token = token
         self._base_url = base_url.rstrip("/")
-        self._scopes = normalize_scopes(scopes) or _DEFAULT_SCOPES
-        self._refresh_token = refresh_token or None
-
-    async def _get_access_token(self) -> str:
-        client = _get_http_client()
-        if self._refresh_token:
-            data = {
-                "grant_type": "refresh_token",
-                "refresh_token": self._refresh_token,
-                "client_id": self._client_id,
-                "client_secret": self._client_secret,
-            }
-        else:
-            data = {
-                "grant_type": "client_credentials",
-                "client_id": self._client_id,
-                "client_secret": self._client_secret,
-                "scope": self._scopes,
-            }
-        try:
-            resp = await client.post(
-                f"{self._base_url}/oauth/token",
-                data=data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-        except httpx.RequestError as e:
-            raise NinjaOneError(0, f"Token request failed: {e or type(e).__name__}") from e
-        if resp.status_code >= 400:
-            raise NinjaOneError(resp.status_code, f"Token request rejected: {self._extract_error(resp)}")
-        try:
-            body = resp.json()
-        except ValueError as e:
-            raise NinjaOneError(0, "Token response was not valid JSON") from e
-        token = body.get("access_token")
-        if not token:
-            raise NinjaOneError(401, "Token response missing access_token")
-        return token
 
     def _extract_error(self, resp: httpx.Response) -> str:
         try:
@@ -188,11 +108,7 @@ class NinjaOneClient:
         url = f"{self._base_url}{path}"
         params = self._clean_params(params)
 
-        # One token for this logical request, reused across its own retries
-        # below — a transient 429/5xx on the actual endpoint doesn't mean
-        # the token itself is bad, so there's no reason to re-exchange it.
-        token = await self._get_access_token()
-        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
         if json_body is not None:
             headers["Content-Type"] = "application/json"
 

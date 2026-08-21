@@ -7,7 +7,7 @@ NinjaOneError, independent of any real HTTP request.
 
 import pytest
 
-from ninjaone_mcp.api_client import NinjaOneClient, NinjaOneError, normalize_scopes
+from ninjaone_mcp.api_client import NinjaOneError
 from ninjaone_mcp.config import Settings
 from ninjaone_mcp.server import create_mcp_server
 
@@ -116,31 +116,3 @@ def test_error_envelope_mapping(status_code, expected_code, expected_retryable):
     assert envelope["error"]["code"] == expected_code
     assert envelope["error"]["retryable"] is expected_retryable
     assert envelope["error"]["message"] == "boom"
-
-
-def test_default_scope_excludes_control():
-    # Regression test: a client that doesn't pass X-Ninja-Scopes must never
-    # be sent to NinjaOne asking for `control` — many API Services apps are
-    # never granted it, and NinjaOne 400s the whole token request rather
-    # than narrowing the grant. See server.py's GatewayTokenMiddleware
-    # docstring and api_client.py's _DEFAULT_SCOPES comment.
-    client = NinjaOneClient("id", "secret", "https://app.ninjarmm.com")
-    assert client._scopes == "monitoring management"
-    assert "control" not in client._scopes
-
-
-@pytest.mark.parametrize(
-    "raw,expected",
-    [
-        (None, None),
-        ("", None),
-        ("   ", None),
-        ("monitoring", "monitoring"),
-        ("monitoring,management", "monitoring management"),
-        ("MONITORING  Control", "monitoring control"),
-        ("monitoring,bogus,control", "monitoring control"),
-        ("bogus", None),
-    ],
-)
-def test_normalize_scopes(raw, expected):
-    assert normalize_scopes(raw) == expected

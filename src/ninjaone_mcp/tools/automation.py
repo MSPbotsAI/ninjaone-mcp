@@ -79,10 +79,10 @@ def register(
     ) -> str:
         """Run a script or built-in action on a device. Destructive: executes real code on the device.
 
-        Needs the X-Ninja-User-Client-Id/-Secret/X-Ninja-Refresh-Token
-        headers — NinjaOne rejects script execution from a machine identity
-        regardless of scope, since it ties the action to a real user.
-        Queues a job — check ninjaone_get_device_active_jobs afterward.
+        Needs the X-Ninja-User-Token header — NinjaOne rejects script
+        execution from a machine identity regardless of scope, since it
+        ties the action to a real user. Queues a job — check ninjaone_get_
+        device_active_jobs afterward.
         """
         client = user_client_factory()
         if client is None:
