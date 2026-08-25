@@ -15,18 +15,13 @@ from .config import Settings, region_base_url
 class _GatewayCreds(NamedTuple):
     token: str
     region: str
-    # Optional second identity for actions that need a real user's own
-    # NinjaOne permissions rather than this token's grant (confirmed:
-    # running a script) — see api_client.py's NinjaOneClient docstring.
-    # Empty string means "not configured".
-    user_token: str
 
 
 # Per-request credential isolation via contextvars.
 # GatewayTokenMiddleware sets this before the MCP handler runs.
 # Python asyncio copies context per task, so concurrent SSE connections are isolated.
 # Nothing here is ever cached outside the request's own contextvar frame —
-# the gateway is responsible for exchanging/refreshing these tokens; this
+# the gateway is responsible for exchanging/refreshing this token; this
 # server only ever holds one for the lifetime of one request.
 _gateway_creds_var: contextvars.ContextVar[_GatewayCreds | None] = contextvars.ContextVar(
     "ninjaone_gateway_creds", default=None
@@ -34,41 +29,27 @@ _gateway_creds_var: contextvars.ContextVar[_GatewayCreds | None] = contextvars.C
 
 
 def get_client_from_context(settings: Settings) -> NinjaOneClient | None:
-    """Resolve the active machine-identity NinjaOneClient."""
+    """Resolve the active NinjaOneClient for the current request context."""
     creds = _gateway_creds_var.get()
     if not creds:
         return None
     return NinjaOneClient(creds.token, region_base_url(creds.region))
 
 
-def get_user_client_from_context(settings: Settings) -> NinjaOneClient | None:
-    """Resolve the active user-identity NinjaOneClient, or None if the
-    caller didn't send X-Ninja-User-Token — that's a normal, expected state
-    for any tenant that hasn't set up a Web Application app, not an error
-    by itself.
-    """
-    creds = _gateway_creds_var.get()
-    if not creds or not creds.user_token:
-        return None
-    return NinjaOneClient(creds.user_token, region_base_url(creds.region))
-
-
 class GatewayTokenMiddleware:
     """ASGI middleware.
 
     Reads X-Ninja-Token (required) — an already-exchanged OAuth2 bearer
-    access token for a machine identity — and X-Ninja-Region (optional,
-    defaults to "us") from request headers and stores them in the
-    contextvar. The gateway is responsible for the OAuth2 exchange
-    (client_credentials) and for refreshing the token before it expires;
-    this server only ever uses whatever token it's handed, per request.
+    access token — and X-Ninja-Region (optional, defaults to "us") from
+    request headers and stores them in the contextvar. The gateway is
+    responsible for the OAuth2 exchange and for refreshing the token
+    before it expires; this server only ever uses whatever token it's
+    handed, per request. One token covers every tool, including running a
+    script — confirmed live: a NinjaOne Web Application app's user-context
+    token successfully ran a script (NinjaOne recorded the job against
+    that user's identity) and also worked for every read tool, so there is
+    no reason to keep a separate machine-identity token for this service.
     Returns 401 if X-Ninja-Token is missing on /mcp requests.
-
-    Also reads one independent, optional header for a second, *user*-
-    context identity: X-Ninja-User-Token (an already-exchanged refresh_
-    token-grant access token). Most tools never use it, but ninjaone_run_
-    script_on_device needs it because NinjaOne rejects script execution
-    from a machine identity regardless of scope.
     """
 
     def __init__(self, app: ASGIApp, settings: Settings):
@@ -88,7 +69,6 @@ class GatewayTokenMiddleware:
         request = Request(scope)
         token = request.headers.get("x-ninja-token")
         region = request.headers.get("x-ninja-region")
-        user_token = request.headers.get("x-ninja-user-token")
         if not token:
             response = JSONResponse(
                 {
@@ -98,14 +78,14 @@ class GatewayTokenMiddleware:
                         "already-exchanged OAuth2 bearer access token)"
                     ),
                     "required_headers": ["X-Ninja-Token"],
-                    "optional_headers": ["X-Ninja-Region", "X-Ninja-User-Token"],
+                    "optional_headers": ["X-Ninja-Region"],
                 },
                 status_code=401,
             )
             await response(scope, receive, send)
             return
 
-        ctx_token = _gateway_creds_var.set(_GatewayCreds(token, region or "", user_token or ""))
+        ctx_token = _gateway_creds_var.set(_GatewayCreds(token, region or ""))
         try:
             await self.app(scope, receive, send)
         finally:
@@ -140,17 +120,12 @@ def create_mcp_server(settings: Settings) -> FastMCP:
             "ninjaone_get_organizations or ninjaone_get_devices to find an id, then "
             "a device/org-scoped tool; for scripting, ninjaone_get_device_scripting_"
             "options to see what's runnable on a device before ninjaone_run_script_"
-            "on_device, then ninjaone_get_device_active_jobs to watch it run. "
-            "ninjaone_run_script_on_device alone needs a second, user-context "
-            "credential — see its own description."
+            "on_device, then ninjaone_get_device_active_jobs to watch it run."
         ),
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
 
     client_factory: Callable[[], NinjaOneClient | None] = lambda: get_client_from_context(settings)
-    user_client_factory: Callable[[], NinjaOneClient | None] = lambda: get_user_client_from_context(
-        settings
-    )
 
     from .tools import alerts, automation, devices, organizations, tickets
 
@@ -158,6 +133,6 @@ def create_mcp_server(settings: Settings) -> FastMCP:
     devices.register(mcp, client_factory)
     alerts.register(mcp, client_factory)
     tickets.register(mcp, client_factory)
-    automation.register(mcp, client_factory, user_client_factory)
+    automation.register(mcp, client_factory)
 
     return mcp

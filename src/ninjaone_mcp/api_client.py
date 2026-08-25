@@ -61,12 +61,13 @@ class NinjaOneClient:
     """Async httpx client wrapping the NinjaOne Public API v2.
 
     Takes an already-exchanged OAuth2 bearer access token, not a client_id/
-    client_secret — the gateway does the OAuth2 exchange (client_credentials
-    for the machine identity, refresh_token for the user identity used by
-    ninjaone_run_script_on_device) and hands this client only the resulting
-    token per request (see server.py). This client never sees, stores, or
-    caches any credential material; it only ever holds the token for the
-    lifetime of one request object.
+    client_secret — the gateway does the OAuth2 exchange and hands this
+    client only the resulting token per request (see server.py). One token
+    covers every tool, including running a script (confirmed live: a
+    NinjaOne Web Application app's user-context token works for both reads
+    and script execution). This client never sees, stores, or caches any
+    credential material; it only ever holds the token for the lifetime of
+    one request object.
     """
 
     def __init__(self, token: str, base_url: str):
