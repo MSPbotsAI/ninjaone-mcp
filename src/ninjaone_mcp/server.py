@@ -9,12 +9,13 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .api_client import NinjaOneClient
-from .config import Settings, region_base_url
+from .config import Settings, resolve_base_url
 
 
 class _GatewayCreds(NamedTuple):
     token: str
     region: str
+    base_url: str = ""
 
 
 # Per-request credential isolation via contextvars.
@@ -33,15 +34,18 @@ def get_client_from_context(settings: Settings) -> NinjaOneClient | None:
     creds = _gateway_creds_var.get()
     if not creds:
         return None
-    return NinjaOneClient(creds.token, region_base_url(creds.region))
+    return NinjaOneClient(creds.token, resolve_base_url(creds.base_url, creds.region))
 
 
 class GatewayTokenMiddleware:
     """ASGI middleware.
 
     Reads X-Ninja-Token (required) — an already-exchanged OAuth2 bearer
-    access token — and X-Ninja-Region (optional, defaults to "us") from
-    request headers and stores them in the contextvar. The gateway is
+    access token — plus ONE of X-Ninja-Base-Url or X-Ninja-Region (both
+    optional; the region defaults to "us") from request headers and stores
+    them in the contextvar. The two name the same thing in different
+    shapes and X-Ninja-Base-Url wins; see config.resolve_base_url for
+    which integration sends which. The gateway is
     responsible for the OAuth2 exchange and for refreshing the token
     before it expires; this server only ever uses whatever token it's
     handed, per request. One token covers every tool, including running a
@@ -69,6 +73,7 @@ class GatewayTokenMiddleware:
         request = Request(scope)
         token = request.headers.get("x-ninja-token")
         region = request.headers.get("x-ninja-region")
+        base_url = request.headers.get("x-ninja-base-url")
         if not token:
             response = JSONResponse(
                 {
@@ -78,14 +83,15 @@ class GatewayTokenMiddleware:
                         "already-exchanged OAuth2 bearer access token)"
                     ),
                     "required_headers": ["X-Ninja-Token"],
-                    "optional_headers": ["X-Ninja-Region"],
+                    "optional_headers": ["X-Ninja-Base-Url", "X-Ninja-Region"],
                 },
                 status_code=401,
             )
             await response(scope, receive, send)
             return
 
-        ctx_token = _gateway_creds_var.set(_GatewayCreds(token, region or ""))
+        ctx_token = _gateway_creds_var.set(
+            _GatewayCreds(token, region or "", base_url or ""))
         try:
             await self.app(scope, receive, send)
         finally:
@@ -94,6 +100,33 @@ class GatewayTokenMiddleware:
 
 def create_mcp_server(settings: Settings) -> FastMCP:
     """Build the FastMCP server instance and register all NinjaOne tools."""
+    # The scripting sentences below must describe the tools ACTUALLY registered further
+    # down: naming ninjaone_run_script_on_device in a deployment that does not register it
+    # sends agents after a capability that isn't there, and the failure they get back is a
+    # generic unknown-tool error rather than anything explaining why.
+    if settings.enable_script_execution:
+        scripting = (
+            "ninjaone_get_automation_scripts/"
+            "ninjaone_get_device_scripting_options/ninjaone_run_script_on_device/"
+            "ninjaone_get_active_jobs/ninjaone_get_device_active_jobs cover scripting "
+            "and the jobs it queues (running a script is destructive)."
+        )
+        scripting_flow = (
+            " for scripting, ninjaone_get_device_scripting_options to see what's "
+            "runnable on a device before ninjaone_run_script_on_device, then "
+            "ninjaone_get_device_active_jobs to watch it run."
+        )
+    else:
+        scripting = (
+            "ninjaone_get_automation_scripts/"
+            "ninjaone_get_device_scripting_options/ninjaone_get_active_jobs/"
+            "ninjaone_get_device_active_jobs cover scripting VISIBILITY only. This "
+            "deployment authenticates as a machine identity and has NO tool for running "
+            "a script or action on a device — NinjaOne binds script execution to a real "
+            "user. It can report which scripts exist and which jobs are running, but "
+            "cannot start one; do not tell the user a script was run."
+        )
+        scripting_flow = ""
     # DNS-rebinding protection is a browser-oriented safeguard that rejects
     # non-localhost Host headers with 421. Disable it so the server works
     # correctly behind a reverse proxy or docker network.
@@ -113,14 +146,9 @@ def create_mcp_server(settings: Settings) -> FastMCP:
             "ninjaone_reset_alert manage active monitoring alerts; "
             "ninjaone_get_ticket_boards/ninjaone_get_tickets/ninjaone_create_ticket/"
             "ninjaone_update_ticket/ninjaone_get_ticket_log_entries cover the "
-            "service-desk; ninjaone_get_automation_scripts/"
-            "ninjaone_get_device_scripting_options/ninjaone_run_script_on_device/"
-            "ninjaone_get_active_jobs/ninjaone_get_device_active_jobs cover scripting "
-            "and the jobs it queues (running a script is destructive). Typical flow: "
+            "service-desk; " + scripting + " Typical flow: "
             "ninjaone_get_organizations or ninjaone_get_devices to find an id, then "
-            "a device/org-scoped tool; for scripting, ninjaone_get_device_scripting_"
-            "options to see what's runnable on a device before ninjaone_run_script_"
-            "on_device, then ninjaone_get_device_active_jobs to watch it run."
+            "a device/org-scoped tool;" + (scripting_flow or "")
         ),
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
         stateless_http=True,
@@ -135,6 +163,7 @@ def create_mcp_server(settings: Settings) -> FastMCP:
     devices.register(mcp, client_factory)
     alerts.register(mcp, client_factory)
     tickets.register(mcp, client_factory)
-    automation.register(mcp, client_factory)
+    automation.register(mcp, client_factory,
+                        include_run_script=settings.enable_script_execution)
 
     return mcp

@@ -25,7 +25,17 @@ from ._common import NO_TOKEN
 # certain.
 
 
-def register(mcp: FastMCP, client_factory: Callable[[], NinjaOneClient | None]) -> None:
+def register(
+    mcp: FastMCP,
+    client_factory: Callable[[], NinjaOneClient | None],
+    include_run_script: bool = True,
+) -> None:
+    """Register the automation tools.
+
+    include_run_script=False omits ninjaone_run_script_on_device and registers only the
+    four read-only tools here. See config.Settings.enable_script_execution for why the
+    machine-identity deployment drops it.
+    """
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def ninjaone_get_automation_scripts() -> str:
@@ -57,7 +67,8 @@ def register(mcp: FastMCP, client_factory: Callable[[], NinjaOneClient | None]) 
         except NinjaOneError as e:
             return e.to_envelope()
 
-    @mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+    # Defined unconditionally, but registered as a tool only when include_run_script is
+    # set — see the conditional mcp.tool() call right after the body.
     async def ninjaone_run_script_on_device(
         device_id: Annotated[int, Field(description="Device to run the script/action on.")],
         type: Annotated[str, Field(description="What to run: SCRIPT (a custom script) or ACTION (a built-in action).")],
@@ -96,6 +107,10 @@ def register(mcp: FastMCP, client_factory: Callable[[], NinjaOneClient | None]) 
             return dump_json_capped({"success": True, "result": result})
         except NinjaOneError as e:
             return e.to_envelope()
+
+    if include_run_script:
+        mcp.tool(annotations=ToolAnnotations(destructiveHint=True))(
+            ninjaone_run_script_on_device)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def ninjaone_get_active_jobs(

@@ -56,6 +56,7 @@ Every request to `/mcp` must include the following HTTP headers:
 |---|---|---|---|---|---|---|
 | `X-Ninja-Token` | string | 必填 | 无 | 无(自由文本) | **已经换好的** NinjaOne OAuth2 bearer access token。可以是 "API Services" App 的 `client_credentials` token(机器身份),也可以是 "Web Application" App 的 `refresh_token` token(用户身份)——两种都验证过对全部 23 个工具有效,选哪种取决于网关那边配的是哪种 App。本服务直接拿它打 NinjaOne API,不做任何换取/刷新——网关要负责在 token 过期前(1小时有效期)刷新好。 | `X-Ninja-Token: <access_token>` |
 | `X-Ninja-Region` | string | 可选 | `us` | `us`, `eu`, `oc`, `ca`, `us2`, `fed` | NinjaOne 部署区域,决定实际请求的 base URL。 | `X-Ninja-Region: eu` |
+| `X-Ninja-Base-Url` | string | 可选 | 无 | 六个区域的 base URL 之一 | NinjaOne 部署的完整 base URL。与 `X-Ninja-Region` 表达同一件事,但**优先级更高**:两个都传时以本字段为准。网关对「客户自带凭据」的集成(`ninjaone-app`)发这个,因为那里区域是客户自己选的、逐租户不同;对共享 App 的集成(`ninjaone`)发 `X-Ninja-Region`,因为那里区域跟着 App 走、所有租户相同。 | `X-Ninja-Base-Url: https://eu.ninjarmm.com` |
 
 Missing `X-Ninja-Token` returns `401 Unauthorized`.
 
@@ -65,8 +66,9 @@ Missing `X-Ninja-Token` returns `401 Unauthorized`.
 |---|---|---|
 | `MCP_HTTP_PORT` | `8080` | Listening port |
 | `MCP_HTTP_HOST` | `0.0.0.0` | Listening host |
+| `ENABLE_SCRIPT_EXECUTION` | `true` | 是否注册 `ninjaone_run_script_on_device`。设为 `false` 时该工具不注册(其余 22 个不变),服务器 instructions 也不再提它。用于同一镜像跑两套部署:带用户身份的 `ninjaone` 保持 `true`,机器身份的 `ninjaone-app` 设 `false`。|
 
-There is no base-URL env var — the base URL is derived per-request from the `X-Ninja-Region` header (see [config.py](src/ninjaone_mcp/config.py)'s region table).
+There is no base-URL env var — the base URL is derived per-request from `X-Ninja-Base-Url`, falling back to the `X-Ninja-Region` region table (see [config.py](src/ninjaone_mcp/config.py)'s `resolve_base_url`).
 
 ## MCP Endpoint
 
@@ -76,7 +78,7 @@ POST http://localhost:8080/mcp
 
 Connect your MCP client with:
 - Transport: `http` (Streamable HTTP)
-- Headers: `X-Ninja-Token` (required, an already-exchanged bearer access token — machine or user identity, both work for every tool), `X-Ninja-Region` (optional)
+- Headers: `X-Ninja-Token` (required, an already-exchanged bearer access token — machine or user identity), `X-Ninja-Base-Url` or `X-Ninja-Region` (both optional; base-url wins)
 
 ## Tool List
 
