@@ -7,7 +7,7 @@ from pydantic import Field
 
 from .._json import dump_json_capped
 from ..api_client import NinjaOneClient, NinjaOneError
-from ._common import NO_TOKEN
+from ._common import NO_TOKEN, _MAX_PAGE_SIZE
 
 # These 5 endpoints were pulled from NinjaOne's official OpenAPI 3.0.1 spec
 # (per the request that specified this module): GET /v2/automation/scripts
@@ -24,6 +24,42 @@ from ._common import NO_TOKEN
 # against a live spec — flagging this rather than presenting it as equally
 # certain.
 
+# PRD-19905 (Gap2): whether GET /api/v2/automation/scripts accepts server-side
+# pageSize/after is unverified against a live NinjaOne tenant (ticket design,
+# Open Questions: "server-side first, client-side fallback"). To keep AC2's
+# "no args => byte-identical to before" guarantee regardless of upstream
+# support, pageSize/after are ONLY sent when the caller passes limit/after —
+# the default no-args call stays exactly the old bare GET. name_filter is
+# always applied client-side after the fetch, so filtering correctness never
+# depends on whether the server honored the paging hint.
+def _filter_by_name(items: list, name_filter: str | None) -> list:
+    if not name_filter:
+        return items
+    needle = name_filter.lower()
+    return [item for item in items if needle in str(item.get("name", "")).lower()]
+
+
+# PRD-19905 (Gap2): the exact response shape of GET /device/{id}/scripting/
+# options (which top-level keys hold the runnable scripts vs. built-in
+# actions) is not pinned down anywhere in this repo or its README — the
+# design doc flags this as "field name to be confirmed against the actual
+# response shape at implementation time". Rather than guess a specific key
+# name and risk silently filtering nothing on a live tenant, this filters
+# every top-level list-of-dicts field whose items carry a "name" key. That
+# makes the filter correct for "scripts"/"actions" (the two groups the
+# tool's own docstring promises) under any of the shapes NinjaOne has been
+# seen to use for similar endpoints, without hard-coding an unverified key.
+def _filter_named_lists(data: dict, name_filter: str | None) -> dict:
+    if not name_filter:
+        return data
+    filtered = dict(data)
+    for key, value in data.items():
+        if isinstance(value, list) and value and all(
+            isinstance(item, dict) and "name" in item for item in value
+        ):
+            filtered[key] = _filter_by_name(value, name_filter)
+    return filtered
+
 
 def register(
     mcp: FastMCP,
@@ -38,13 +74,33 @@ def register(
     """
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def ninjaone_get_automation_scripts() -> str:
-        """List the automation scripts available in this NinjaOne instance (id, name, language, ...)."""
+    async def ninjaone_get_automation_scripts(
+        name_filter: Annotated[
+            str | None,
+            Field(description="Case-insensitive substring match on script name, e.g. \"Rewst (Windows)\". Applied after fetch, so it finds scripts that would otherwise be cut off by the response size cap."),
+        ] = None,
+        limit: Annotated[
+            int | None, Field(description="Server-side page-size hint (max 200). Omit for the default, unpaginated call.")
+        ] = None,
+        after: Annotated[
+            int | None, Field(description="Pagination cursor: the last script id from a previous page.")
+        ] = None,
+    ) -> str:
+        """List the automation scripts available in this NinjaOne instance (id, name, language, ...).
+
+        Pass name_filter to find a specific script by (sub)name without being cut off
+        by truncation when the instance has hundreds of scripts — omit all three args
+        for the original unfiltered/unpaginated behavior.
+        """
         client = client_factory()
         if client is None:
             return NO_TOKEN
         try:
-            result = await client.get("/api/v2/automation/scripts")
+            params = None
+            if limit is not None or after is not None:
+                params = {"pageSize": min(limit, _MAX_PAGE_SIZE) if limit is not None else None, "after": after}
+            result = await client.get("/api/v2/automation/scripts", params)
+            result = _filter_by_name(result, name_filter)
             return dump_json_capped({"scripts": result})
         except NinjaOneError as e:
             return e.to_envelope()
@@ -52,17 +108,23 @@ def register(
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def ninjaone_get_device_scripting_options(
         device_id: Annotated[int, Field(description="Device identifier.")],
+        name_filter: Annotated[
+            str | None,
+            Field(description="Case-insensitive substring match on script/action name. Applied after fetch to every named list in the response (scripts, actions)."),
+        ] = None,
     ) -> str:
         """Get what's runnable on a device: available scripts, built-in actions, and run-as credential options.
 
         Call this before ninjaone_run_script_on_device to confirm a script/action
-        id and runAs value are actually valid for that specific device.
+        id and runAs value are actually valid for that specific device. Pass
+        name_filter to narrow a long list down to one candidate by name.
         """
         client = client_factory()
         if client is None:
             return NO_TOKEN
         try:
             result = await client.get(f"/api/v2/device/{device_id}/scripting/options")
+            result = _filter_named_lists(result, name_filter)
             return dump_json_capped(result)
         except NinjaOneError as e:
             return e.to_envelope()

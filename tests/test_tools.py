@@ -18,6 +18,7 @@ EXPECTED_TOOLS = {
     "ninjaone_create_organization": {"name"},
     "ninjaone_get_organization_locations": {"organization_id"},
     "ninjaone_get_organization_devices": {"organization_id"},
+    "ninjaone_get_organization_custom_fields": {"organization_id"},
     # devices
     "ninjaone_get_devices": set(),
     "ninjaone_get_device": {"device_id"},
@@ -47,6 +48,7 @@ READ_ONLY_TOOLS = {
     "ninjaone_get_organization",
     "ninjaone_get_organization_locations",
     "ninjaone_get_organization_devices",
+    "ninjaone_get_organization_custom_fields",
     "ninjaone_get_devices",
     "ninjaone_get_device",
     "ninjaone_get_device_alerts",

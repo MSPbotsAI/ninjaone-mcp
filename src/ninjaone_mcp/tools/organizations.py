@@ -105,6 +105,38 @@ def register(mcp: FastMCP, client_factory: Callable[[], NinjaOneClient | None]) 
         except NinjaOneError as e:
             return e.to_envelope()
 
+    # PRD-19905 (Gap3): the upstream path is unverified against a live NinjaOne
+    # tenant — the design doc flags /api/v2/organization/{id}/custom-fields as a
+    # best-guess pending confirmation against NinjaOne's OpenAPI 3.0.1 spec. If
+    # the real path differs, only this one tool's implementation needs to change
+    # (see docs/tickets/PRD-19905.md "Self-test" for how this was left).
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def ninjaone_get_organization_custom_fields(
+        organization_id: Annotated[int, Field(description="Organization identifier.")],
+    ) -> str:
+        """Read an organization's configured custom fields/variables (name/value pairs).
+
+        Use this to read org-level configuration such as a preferred run-as
+        identity before calling ninjaone_run_script_on_device. Only fields that
+        are actually configured are returned — an org with none configured
+        still returns a response (empty fields + explicit note), never a
+        silent omission, so the caller can reliably fall back when a
+        specific field isn't present.
+        """
+        client = client_factory()
+        if client is None:
+            return NO_TOKEN
+        try:
+            result = await client.get(f"/api/v2/organization/{organization_id}/custom-fields")
+            fields = result if isinstance(result, dict) else {}
+            if not fields:
+                return dump_json_capped(
+                    {"fields": {}, "note": "no custom fields configured for this organization"}
+                )
+            return dump_json_capped({"fields": fields})
+        except NinjaOneError as e:
+            return e.to_envelope()
+
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def ninjaone_get_organization_devices(
         organization_id: Annotated[int, Field(description="Organization identifier.")],

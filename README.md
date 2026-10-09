@@ -14,7 +14,7 @@ NinjaOne is an RMM (remote monitoring and management) platform MSPs use to manag
 
 ## Overview
 
-This server implements the [Model Context Protocol](https://modelcontextprotocol.io/) (Streamable HTTP transport) with **23 tools** across 5 groups, following the MSPbots **Vendor MCP Service SOP**: stateless, no stored credentials, per-request header authentication.
+This server implements the [Model Context Protocol](https://modelcontextprotocol.io/) (Streamable HTTP transport) with **24 tools** across 5 groups, following the MSPbots **Vendor MCP Service SOP**: stateless, no stored credentials, per-request header authentication.
 
 This was built starting from the community [wyre-technology/ninjaone-mcp](https://github.com/wyre-technology/ninjaone-mcp) project's tool surface (organizations/devices/alerts/tickets, reimplemented here directly against NinjaOne's REST API rather than its Node SDK) and extends it with 5 automation/scripting/jobs tools pulled from NinjaOne's own OpenAPI 3.0.1 spec — every endpoint below was checked against a real NinjaOne API spec, not guessed or copied from a secondary source.
 
@@ -89,6 +89,7 @@ Connect your MCP client with:
 | `ninjaone_create_organization` | 创建新组织 | `name`(必填), `description?`, `node_approval_mode?`, `tags?`, `template_organization_id?` |
 | `ninjaone_get_organization_locations` | 列出组织下的站点(location) | `organization_id`(必填) |
 | `ninjaone_get_organization_devices` | 列出组织下的设备 | `organization_id`(必填), `limit?`, `after?` |
+| `ninjaone_get_organization_custom_fields` | 读组织级自定义字段/变量(名值对) | `organization_id`(必填) |
 | `ninjaone_get_devices` | 全局列出设备,支持 `df` 过滤表达式 | `df?`, `limit?`, `after?` |
 | `ninjaone_get_device` | 按 ID 查单个设备详情 | `device_id`(必填) |
 | `ninjaone_get_device_alerts` | 查单个设备的活跃告警 | `device_id`(必填) |
@@ -102,8 +103,8 @@ Connect your MCP client with:
 | `ninjaone_create_ticket` | 创建新工单 | `summary`(必填), `organization_id`(必填), `description?`, `device_id?`, `location_id?`, `ticket_form_id?`, `status?`, `priority?`, `severity?`, `type?` |
 | `ninjaone_update_ticket` | 更新工单字段和/或添加评论 | `ticket_id`(必填), `summary?`, `status?`, `priority?`, `assignee_id?`, `comment?`, `comment_public?` |
 | `ninjaone_get_ticket_log_entries` | 查工单日志(描述/评论/变更历史) | `ticket_id`(必填), `entry_type?` |
-| `ninjaone_get_automation_scripts` | 列出可用的自动化脚本 | 无 |
-| `ninjaone_get_device_scripting_options` | 查设备上可运行的脚本/内置动作/凭据选项 | `device_id`(必填) |
+| `ninjaone_get_automation_scripts` | 列出可用的自动化脚本 | `name_filter?`, `limit?`, `after?` |
+| `ninjaone_get_device_scripting_options` | 查设备上可运行的脚本/内置动作/凭据选项 | `device_id`(必填), `name_filter?` |
 | `ninjaone_run_script_on_device` | 在设备上运行脚本或内置动作(破坏性操作) | `device_id`(必填), `type`(必填,"SCRIPT"/"ACTION"), `script_id?`, `action_uid?`, `parameters?`, `run_as?` |
 | `ninjaone_get_active_jobs` | 全局列出正在运行/排队的任务 | `job_type?`, `df?` |
 | `ninjaone_get_device_active_jobs` | 查单个设备正在运行/排队的任务 | `device_id`(必填) |
@@ -158,3 +159,4 @@ Running a script on a device:
 - **`ninjaone_get_devices`'s `df` filter can be silently dropped** by NinjaOne when scoping by organization (a known issue in the community project) — prefer `ninjaone_get_organization_devices` for an org-scoped device list.
 - **Architecture history**: this server originally did its own OAuth2 exchange (took `client_id`/`client_secret` and called `/oauth/token` itself, per-request, never caching the result). That's since moved to the gateway — this server now only ever takes an already-exchanged bearer token (`X-Ninja-Token`) — matching the pattern MSPbots' gateway already uses for `ms-graph-mcp`/`connectwise-asio-mcp`. A brief intermediate design split machine and user identities into two separate headers (`X-Ninja-Token` / `X-Ninja-User-Token`) on the assumption that `ninjaone_run_script_on_device` specifically needed a user-context token; live testing showed a single Web Application user token works for every tool, so that split was removed in favor of the one-header design here. The gateway is responsible for the OAuth2 exchange and for refreshing the token before its 1-hour expiry; if it doesn't, `X-Ninja-Token` requests will 401 against real NinjaOne endpoints (mapped to `unauthorized` here), not against this server's own logic.
 - Verified against a live NinjaOne account: `tools/list` returns all 23 tools with clean schemas, `pytest` (15 tests) passes, and real calls using a real, already-exchanged bearer token (via `X-Ninja-Token`) returned real data for reads (organizations, devices, scripting options, jobs) *and* successfully executed a real script on a real device — NinjaOne recorded the resulting job against the token's own user identity, confirming script execution is tied to who the token represents.
+- **PRD-19905 additions not yet live-verified**: `ninjaone_get_organization_custom_fields`'s endpoint path (`/api/v2/organization/{id}/custom-fields`) is a best guess pending confirmation against a live tenant, and `ninjaone_get_device_scripting_options`'s `name_filter` filters every top-level list-of-dicts field that carries a `name` key (the response's exact `scripts`/`actions` key names aren't pinned down anywhere in this repo) — see the comments at the top of the relevant functions in [`tools/automation.py`](src/ninjaone_mcp/tools/automation.py) and [`tools/organizations.py`](src/ninjaone_mcp/tools/organizations.py), and `docs/tickets/PRD-19905.md`'s "Self-test" section for what unit coverage this got instead (mocked client, no live NinjaOne tenant available to this change).
