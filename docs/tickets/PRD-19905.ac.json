@@ -1,0 +1,37 @@
+[
+  {
+    "id": "TC-CB-001",
+    "ac": "AC1",
+    "text": "Given NinjaOne instance automation-script count exceeds dump_json_capped's 20000-char truncation threshold (e.g. 489 scripts), When ninjaone_get_automation_scripts(name_filter=\"Rewst (Windows)\") is called, Then the result contains that script's id/name/language fields and is unaffected by truncation",
+    "type": "auto",
+    "tests": ["tests/test_automation.py::test_name_filter_finds_script_past_truncation_threshold"]
+  },
+  {
+    "id": "TC-CB-002",
+    "ac": "AC2",
+    "text": "Given the same over-threshold script list, When ninjaone_get_automation_scripts() is called with no name_filter, Then the result is byte-identical to the pre-change behavior (including any truncated/original_count markers)",
+    "type": "auto",
+    "tests": ["tests/test_automation.py::test_no_filter_preserves_existing_truncation_behavior"]
+  },
+  {
+    "id": "TC-CB-003",
+    "ac": "AC3",
+    "text": "Given a device with a large number of runnable scripts/actions, When ninjaone_get_device_scripting_options(device_id, name_filter=\"Rewst\") is called, Then only name-matching entries are returned",
+    "type": "auto",
+    "tests": ["tests/test_automation.py::test_device_scripting_options_name_filter"]
+  },
+  {
+    "id": "TC-CB-004",
+    "ac": "AC4",
+    "text": "Given an organization with the custom field ninja_run_as_user configured, When ninjaone_get_organization_custom_fields(organization_id) is called, Then the field's name and value are readable in the result",
+    "type": "auto",
+    "tests": ["tests/test_organizations.py::test_custom_fields_returns_configured_value"]
+  },
+  {
+    "id": "TC-CB-005",
+    "ac": "AC5",
+    "text": "Given an organization with no custom fields configured at all, When the same tool is called, Then the result explicitly marks the field as absent, not an error and not a silent omission",
+    "type": "auto",
+    "tests": ["tests/test_organizations.py::test_custom_fields_absent_is_explicit_not_silent"]
+  }
+]
