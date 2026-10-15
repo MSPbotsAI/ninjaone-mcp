@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     # under either identity.
     enable_script_execution: bool = True
 
+    # Public base URL of the /cb/{token} routes as the internet sees them (through
+    # mcp-edge), e.g. https://agentos.mspbots.ai/mcp-edge/ninjaone. Set per environment
+    # in MCP-Management-Service vendor-env/ninjaone.env.<env>. Empty = the callback tools
+    # answer not_configured.
+    callback_public_base_url: str = ""
+
 
 def get_settings() -> Settings:
     return Settings()

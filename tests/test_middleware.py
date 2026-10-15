@@ -187,7 +187,13 @@ def test_run_script_tool_is_omitted_when_script_execution_disabled():
 
     full = asyncio.run(names(True))
     reduced = asyncio.run(names(False))
-    assert full - reduced == {"ninjaone_run_script_on_device"}
+    assert full - reduced == {
+        "ninjaone_run_script_on_device",
+        # A callback URL is only useful to a script this deployment can run.
+        "ninjaone_callback_create_pair",
+        "ninjaone_callback_wait",
+        "ninjaone_callback_expire",
+    }
     assert "ninjaone_get_automation_scripts" in reduced
     assert "ninjaone_get_device_active_jobs" in reduced
 
@@ -201,3 +207,5 @@ def test_instructions_do_not_name_the_script_tool_when_disabled():
     disabled = create_mcp_server(Settings(enable_script_execution=False))
     assert "ninjaone_run_script_on_device" in enabled.instructions
     assert "ninjaone_run_script_on_device" not in disabled.instructions
+    assert "ninjaone_callback_create_pair" in enabled.instructions
+    assert "ninjaone_callback" not in disabled.instructions

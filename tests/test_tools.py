@@ -41,6 +41,10 @@ EXPECTED_TOOLS = {
     "ninjaone_run_script_on_device": {"device_id", "type"},
     "ninjaone_get_active_jobs": set(),
     "ninjaone_get_device_active_jobs": {"device_id"},
+    # callbacks (PRD-19905)
+    "ninjaone_callback_create_pair": {"body"},
+    "ninjaone_callback_wait": {"pair_ids"},
+    "ninjaone_callback_expire": {"pair_ids"},
 }
 
 READ_ONLY_TOOLS = {
@@ -62,6 +66,7 @@ READ_ONLY_TOOLS = {
     "ninjaone_get_device_scripting_options",
     "ninjaone_get_active_jobs",
     "ninjaone_get_device_active_jobs",
+    "ninjaone_callback_wait",
 }
 
 DESTRUCTIVE_TOOLS = {"ninjaone_reboot_device", "ninjaone_reset_alert", "ninjaone_run_script_on_device"}

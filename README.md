@@ -14,7 +14,7 @@ NinjaOne is an RMM (remote monitoring and management) platform MSPs use to manag
 
 ## Overview
 
-This server implements the [Model Context Protocol](https://modelcontextprotocol.io/) (Streamable HTTP transport) with **24 tools** across 5 groups, following the MSPbots **Vendor MCP Service SOP**: stateless, no stored credentials, per-request header authentication.
+This server implements the [Model Context Protocol](https://modelcontextprotocol.io/) (Streamable HTTP transport) with **27 tools** across 6 groups, following the MSPbots **Vendor MCP Service SOP**: no stored credentials, per-request header authentication. It is stateless **except** for the callback URL pairs (see [Callback URLs](#callback-urls-prd-19905)).
 
 This was built starting from the community [wyre-technology/ninjaone-mcp](https://github.com/wyre-technology/ninjaone-mcp) project's tool surface (organizations/devices/alerts/tickets, reimplemented here directly against NinjaOne's REST API rather than its Node SDK) and extends it with 5 automation/scripting/jobs tools pulled from NinjaOne's own OpenAPI 3.0.1 spec — every endpoint below was checked against a real NinjaOne API spec, not guessed or copied from a secondary source.
 
@@ -54,7 +54,7 @@ Every request to `/mcp` must include the following HTTP headers:
 
 | Header | 类型 | 是否必填 | 默认值 | 枚举值 | 字段描述 | Example |
 |---|---|---|---|---|---|---|
-| `X-Ninja-Token` | string | 必填 | 无 | 无(自由文本) | **已经换好的** NinjaOne OAuth2 bearer access token。可以是 "API Services" App 的 `client_credentials` token(机器身份),也可以是 "Web Application" App 的 `refresh_token` token(用户身份)——两种都验证过对全部 23 个工具有效,选哪种取决于网关那边配的是哪种 App。本服务直接拿它打 NinjaOne API,不做任何换取/刷新——网关要负责在 token 过期前(1小时有效期)刷新好。 | `X-Ninja-Token: <access_token>` |
+| `X-Ninja-Token` | string | 必填 | 无 | 无(自由文本) | **已经换好的** NinjaOne OAuth2 bearer access token。可以是 "API Services" App 的 `client_credentials` token(机器身份),也可以是 "Web Application" App 的 `refresh_token` token(用户身份)——两种都验证过对当时全部 23 个工具有效,选哪种取决于网关那边配的是哪种 App。本服务直接拿它打 NinjaOne API,不做任何换取/刷新——网关要负责在 token 过期前(1小时有效期)刷新好。 | `X-Ninja-Token: <access_token>` |
 | `X-Ninja-Region` | string | 可选 | `us` | `us`, `eu`, `oc`, `ca`, `us2`, `fed` | NinjaOne 部署区域,决定实际请求的 base URL。 | `X-Ninja-Region: eu` |
 | `X-Ninja-Base-Url` | string | 可选 | 无 | 六个区域的 base URL 之一 | NinjaOne 部署的完整 base URL。与 `X-Ninja-Region` 表达同一件事,但**优先级更高**:两个都传时以本字段为准。网关对「客户自带凭据」的集成(`ninjaone-app`)发这个,因为那里区域是客户自己选的、逐租户不同;对共享 App 的集成(`ninjaone`)发 `X-Ninja-Region`,因为那里区域跟着 App 走、所有租户相同。 | `X-Ninja-Base-Url: https://eu.ninjarmm.com` |
 
@@ -66,7 +66,8 @@ Missing `X-Ninja-Token` returns `401 Unauthorized`.
 |---|---|---|
 | `MCP_HTTP_PORT` | `8080` | Listening port |
 | `MCP_HTTP_HOST` | `0.0.0.0` | Listening host |
-| `ENABLE_SCRIPT_EXECUTION` | `true` | 是否注册 `ninjaone_run_script_on_device`。设为 `false` 时该工具不注册(其余 22 个不变),服务器 instructions 也不再提它。用于同一镜像跑两套部署:带用户身份的 `ninjaone` 保持 `true`,机器身份的 `ninjaone-app` 设 `false`。|
+| `CALLBACK_PUBLIC_BASE_URL` | 空 | 回调地址的公网前缀(经 mcp-edge),如 `https://agentos.mspbots.ai/mcp-edge/ninjaone`;工具返回 `{前缀}/cb/{token}`。按环境配在 MCP-Management-Service 的 `vendor-env/ninjaone.env.<环境>`。为空时 `ninjaone_callback_create_pair` 返回 `not_configured`。|
+| `ENABLE_SCRIPT_EXECUTION` | `true` | 是否注册 `ninjaone_run_script_on_device`。设为 `false` 时该工具和 3 个回调工具(`ninjaone_callback_*`)、`/cb/{token}` 路由都不注册(其余 23 个不变),服务器 instructions 也不再提它们。用于同一镜像跑两套部署:带用户身份的 `ninjaone` 保持 `true`,机器身份的 `ninjaone-app` 设 `false`。|
 
 There is no base-URL env var — the base URL is derived per-request from `X-Ninja-Base-Url`, falling back to the `X-Ninja-Region` region table (see [config.py](src/ninjaone_mcp/config.py)'s `resolve_base_url`).
 
@@ -108,6 +109,34 @@ Connect your MCP client with:
 | `ninjaone_run_script_on_device` | 在设备上运行脚本或内置动作(破坏性操作) | `device_id`(必填), `type`(必填,"SCRIPT"/"ACTION"), `script_id?`, `action_uid?`, `parameters?`, `run_as?` |
 | `ninjaone_get_active_jobs` | 全局列出正在运行/排队的任务 | `job_type?`, `df?` |
 | `ninjaone_get_device_active_jobs` | 查单个设备正在运行/排队的任务 | `device_id`(必填) |
+| `ninjaone_callback_create_pair` | 建一对临时公网地址:GET 返回 `body`,POST 接收脚本结果 | `body`(必填), `ttl_seconds?`(60-600,默认 600) |
+| `ninjaone_callback_wait` | 批量等待脚本回传,返回每对的状态和 body | `pair_ids`(必填), `wait_seconds?`(0-60,默认 30) |
+| `ninjaone_callback_expire` | 提前作废地址对 | `pair_ids`(必填) |
+
+## Callback URLs (PRD-19905)
+
+NinjaOne's API queues a script and never returns its output, so a script that must report
+results calls back itself: it downloads its payload from a temporary GET URL and POSTs its
+JSON result to a temporary POST URL.
+
+```
+agent ─(gateway)─▶ ninjaone_callback_create_pair  → pair_id, get_url, post_url
+agent ─(gateway)─▶ ninjaone_run_script_on_device  (get_url / post_url as script parameters)
+device ─▶ GET  {CALLBACK_PUBLIC_BASE_URL}/cb/{get_token}   → body (text/plain)
+device ─▶ POST {CALLBACK_PUBLIC_BASE_URL}/cb/{post_token}  → {"ok": true}
+agent ─(gateway)─▶ ninjaone_callback_wait([pair_id, ...])  → received / malformed / pending / expired / unknown
+```
+
+- `/cb/{token}` is public and unauthenticated (the caller is a script on a customer device);
+  the 256-bit token is the credential. Unknown, expired and wrong-method tokens all return a
+  bare `404`. It is exposed to the internet only through MCP-Management-Service's mcp-edge
+  (`/mcp-edge/ninjaone/cb/...`); `/mcp` never is.
+- **Stateful exception**: pairs live in process memory ([callbacks.py](src/ninjaone_mcp/callbacks.py)),
+  so the server must run as **one** process (it does: a single `uvicorn.run`). A restart or
+  blue/green switch drops pending pairs; they then read `unknown`, which the agent treats as
+  a timeout. Pairs last at most 600 s.
+- Not yet done (deferred by decision): GET bodies are free text from the agent, URLs are not
+  single-use, and a later POST overwrites an earlier one.
 
 ## 测试示例 (Test Example)
 

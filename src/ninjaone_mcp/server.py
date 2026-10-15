@@ -114,7 +114,9 @@ def create_mcp_server(settings: Settings) -> FastMCP:
         scripting_flow = (
             " for scripting, ninjaone_get_device_scripting_options to see what's "
             "runnable on a device before ninjaone_run_script_on_device, then "
-            "ninjaone_get_device_active_jobs to watch it run."
+            "ninjaone_get_device_active_jobs to watch it. For script results: "
+            "ninjaone_callback_create_pair per device (URLs as script params), then "
+            "ninjaone_callback_wait."
         )
     else:
         scripting = (
@@ -157,7 +159,8 @@ def create_mcp_server(settings: Settings) -> FastMCP:
 
     client_factory: Callable[[], NinjaOneClient | None] = lambda: get_client_from_context(settings)
 
-    from .tools import alerts, automation, devices, organizations, tickets
+    from .callbacks import STORE
+    from .tools import alerts, automation, callbacks, devices, organizations, tickets
 
     organizations.register(mcp, client_factory)
     devices.register(mcp, client_factory)
@@ -165,5 +168,7 @@ def create_mcp_server(settings: Settings) -> FastMCP:
     tickets.register(mcp, client_factory)
     automation.register(mcp, client_factory,
                         include_run_script=settings.enable_script_execution)
+    callbacks.register(mcp, STORE, settings.callback_public_base_url,
+                       enabled=settings.enable_script_execution)
 
     return mcp
